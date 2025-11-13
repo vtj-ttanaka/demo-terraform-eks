@@ -1,3 +1,16 @@
+resource "aws_security_group" "bad_example" {
+  name        = "bad-security-group"
+  description = "Security group with overly permissive rules"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # Trivyが検出: 全IPからのSSHアクセス
+  }
+}
+
 module "vpc" {
   source = "../../modules/vpc"
 
