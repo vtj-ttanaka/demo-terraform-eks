@@ -17,7 +17,7 @@ module "eks" {
   source = "../../modules/eks"
 
   cluster_name            = "my-cluster-prod"
-  cluster_version         = "1.32"
+  cluster_version         = "1.33"
   subnet_ids              = concat(module.vpc.public_subnet_ids, module.vpc.private_subnet_ids)
   private_subnet_ids      = module.vpc.private_subnet_ids
   endpoint_private_access = true
