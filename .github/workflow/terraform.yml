@@ -1,0 +1,175 @@
+name: Terraform CI/CD
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'terraform/environments/**'
+      - 'terraform/modules/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'terraform/environments/**'
+      - 'terraform/modules/**'
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  detect-changes:
+    name: Detect Changed Environments
+    runs-on: ubuntu-latest
+    outputs:
+      environments: ${{ steps.detect.outputs.environments }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed environments
+        id: detect
+        run: |
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE_SHA="${{ github.event.before }}"
+            HEAD_SHA="${{ github.sha }}"
+          fi
+
+          CHANGED_FILES=$(git diff --name-only $BASE_SHA $HEAD_SHA)
+          ENVIRONMENTS=$(echo "$CHANGED_FILES" | grep -E '^terraform/environments/[^/]+' | cut -d'/' -f3 | sort -u | jq -R -s -c 'split("\n")[:-1]')
+
+          # モジュールが変更された場合は全環境を対象にする
+          if echo "$CHANGED_FILES" | grep -q '^terraform/modules/'; then
+            ENVIRONMENTS='["dev","staging","prod"]'
+          fi
+
+          echo "environments=$ENVIRONMENTS" >> $GITHUB_OUTPUT
+          echo "Detected environments: $ENVIRONMENTS"
+
+  terraform-plan:
+    name: Terraform Plan
+    needs: detect-changes
+    if: github.event_name == 'pull_request' && needs.detect-changes.outputs.environments != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: ${{ fromJson(needs.detect-changes.outputs.environments) }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ matrix.environment == 'prod' && 'arn:aws:iam::960052897027:role/GitHubActionsRole' || 'arn:aws:iam::960052897027:role/GitHubActionsRole' }}
+          aws-region: ap-northeast-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.5
+
+      - name: Terraform Format Check
+        id: fmt
+        run: terraform fmt -check -recursive
+        working-directory: ./terraform
+        continue-on-error: true
+
+      - name: Terraform Init
+        id: init
+        run: terraform init
+        working-directory: ./terraform/environments/${{ matrix.environment }}
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate
+        working-directory: ./terraform/environments/${{ matrix.environment }}
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -no-color -out=tfplan
+        working-directory: ./terraform/environments/${{ matrix.environment }}
+        continue-on-error: true
+
+      - name: Comment PR
+        uses: actions/github-script@v8
+        if: github.event_name == 'pull_request'
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `### Terraform Plan - \`${{ matrix.environment }}\` Environment
+
+            #### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+            #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+            #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
+            <details><summary>Validation Output</summary>
+
+            \`\`\`
+            ${{ steps.validate.outputs.stdout }}
+            \`\`\`
+
+            </details>
+
+            #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`
+            ${{ steps.plan.outputs.stdout }}
+            \`\`\`
+
+            </details>
+
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Workflow: \`${{ github.workflow }}\`*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+
+      - name: Terraform Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+  terraform-apply:
+    name: Terraform Apply
+    needs: detect-changes
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.detect-changes.outputs.environments != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: ${{ fromJson(needs.detect-changes.outputs.environments) }}
+    environment: ${{ matrix.environment }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ matrix.environment == 'prod' && 'arn:aws:iam::960052897027:role/GitHubActionsRole' || 'arn:aws:iam::960052897027:role/GitHubActionsRole' }}
+          aws-region: ap-northeast-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.5
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ./terraform/environments/${{ matrix.environment }}
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
+        working-directory: ./terraform/environments/${{ matrix.environment }}
